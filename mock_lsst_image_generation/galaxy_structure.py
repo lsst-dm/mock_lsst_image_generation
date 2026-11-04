@@ -12,12 +12,13 @@ its catalogue axis ratio implies, via the exact line-of-sight projection
     (1 / cos i) integral of Sigma(x, (y + z sin i) / cos i) f(z) dz          (x along the major axis)
 done by Gauss-Hermite quadrature. The result is two images per unit disc flux, each summing to zero: the bar part
 (the disc's colours) and the arm / clump part (bluer: scaled per band by ARM_COLOUR_BOOST). GalSim's smooth disc
-stays as it is; these images are added on top of its stamp, convolved with the same Gaussian PSF.
+stays as it is; these images are added on top of its stamp, convolved with the same PSF.
 """
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
 from scipy.special import gammaincinv, gammaln
+
+from .psf import convolve_psf
 
 ARM_COLOUR_BOOST = dict(u=1.4, g=1.25, r=1.0, i=0.8, z=0.7, y=0.65)  # arm contrast per band (young stars are blue)
 BAR_STRENGTH, BAR_SHARPNESS, BAR_FLATNESS = 0.9, 6.0, 4.0  # bar mode amplitude, power, flattening of the disc inside
@@ -138,10 +139,10 @@ def has_structure(record, min_re_arcsec):
                 and np.isfinite(record["ellipticity_disc"]))
 
 
-def add_structure(cube, xmin, ymin, record, bands, psf_fwhm, pixscale):
+def add_structure(cube, xmin, ymin, record, bands, psf, pixscale):
     """Add a galaxy's arms / bar / clumps to its rendered stamp cube (band, y, x) in place, band by band scaled by
-    its disc flux and convolved with the band's Gaussian PSF. Only the part of the stamp within EXTENT_H disc scale
-    lengths of the centre is touched."""
+    its disc flux and convolved with the band's PSF (psf.convolve_psf). Only the part of the stamp within EXTENT_H
+    disc scale lengths of the centre is touched."""
     size = cube.shape[1]
     q = min(max(1.0 - float(record["ellipticity_disc"]), MIN_COS_INCLINATION), 1.0)
     # GalSim stretches an inclined disc's major axis by 1 / sqrt(q), so the window must reach that far.
@@ -163,7 +164,6 @@ def add_structure(cube, xmin, ymin, record, bands, psf_fwhm, pixscale):
         flux = float(record.get(f"flux_{band}_disc", 0.0))
         if not (np.isfinite(flux) and flux > 0):
             continue
-        sigma = psf_fwhm[band] / 2.355 / pixscale
         extra = min(ARM_COLOUR_BOOST.get(band, 1.0) - 1.0, boost_room)
         image = flux * (bar + arms + extra * (arm_light - arm_light.sum() * disc))
-        cube[i, y0:y1, x0:x1] += gaussian_filter(image, sigma, mode="constant").astype(cube.dtype)
+        cube[i, y0:y1, x0:x1] += convolve_psf(image, psf[band], pixscale).astype(cube.dtype)

@@ -14,6 +14,7 @@ import pandas as pd
 from scipy.ndimage import gaussian_filter
 
 from .photometry import mag_to_flux_njy
+from .psf import convolve_psf
 
 CORE_SERSIC = dict(n=3.9, rb_over_re=3.63 / 30.0, gamma=0.02, alpha=3.6, q=0.7)
 COLOURS_FROM_R = dict(u=2.2, g=0.65, r=0.0, i=-0.35, z=-0.60, y=-0.70)  # m_band - m_r (notebook colours)
@@ -66,8 +67,8 @@ def add_bcgs(mock, cfg, rng):
     return pd.concat([mock, t], ignore_index=True)
 
 
-def render_bcg(record, psf_fwhm, bands, pixscale):
-    """(xmin, ymin, cube) stamp of a core-Sersic record, each band convolved with its Gaussian PSF."""
+def render_bcg(record, psf, bands, pixscale):
+    """(xmin, ymin, cube) stamp of a core-Sersic record, each band convolved with its PSF (psf.convolve_psf)."""
     re_pix = float(record["re_total_arcsec"]) / pixscale
     half = int(STAMP_RE * re_pix)
     ix, iy = int(np.floor(record["x_img"] + 0.5)), int(np.floor(record["y_img"] + 0.5))
@@ -76,6 +77,6 @@ def render_bcg(record, psf_fwhm, bands, pixscale):
     for k, band in enumerate(bands):
         flux = float(record.get(f"flux_{band}_total", 0.0))
         if np.isfinite(flux) and flux > 0:
-            cube[k] = gaussian_filter(unit * flux, psf_fwhm[band] / 2.355 / pixscale)
+            cube[k] = convolve_psf(unit * flux, psf[band], pixscale, mode="reflect")
     return ix - half, iy - half, cube
 

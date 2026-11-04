@@ -18,7 +18,7 @@ import pandas as pd
 
 from .bcg_sources import add_bcgs
 from .bulge_disc_decomposition import add_bulge_disc_components, draw_bulge_to_total
-from .config import CATALOGUE_STEM, CONFIG, N_CATALOGUES, PHYS, catalogue_splits
+from .config import CATALOGUE_STEM, CONFIG, N_CATALOGUES, PHYS, STAR_CONFIG, catalogue_splits
 from .cosmology import build_cosmology_grids, trapz
 from .donor_selection import rest_frame_sed_checks
 from .environment_sampling import assign_clustered_positions, draw_web_positions
@@ -127,12 +127,14 @@ def apply_render_cuts(mock, cfg):
     return mock
 
 
-def build_mock_catalogue(cosmos, cfg=None, phys=None):
+def build_mock_catalogue(cosmos, cfg=None, phys=None, star_cfg=None):
     """Generate one mock-catalogue realisation from a COSMOS2025 table (see load_cosmos2025_catalogue).
 
-    cfg / phys override the CONFIG / PHYS defaults (partial dicts are fine); cfg['seed'] fixes the realisation.
+    cfg / phys / star_cfg override the CONFIG / PHYS / STAR_CONFIG defaults (partial dicts are fine);
+    cfg['seed'] fixes the realisation.
     """
     cfg, phys = {**CONFIG, **(cfg or {})}, {**PHYS, **(phys or {})}
+    star_cfg = {**STAR_CONFIG, **(star_cfg or {})}
     rng, grids = np.random.default_rng(cfg["seed"]), build_cosmology_grids(cfg)
 
     donors = build_rest_frame_donor_table(cosmos, cfg, grids)
@@ -173,7 +175,7 @@ def build_mock_catalogue(cosmos, cfg=None, phys=None):
     print("Projection edge distance percentiles:")
     print(np.nanpercentile(mock["projection_edge_distance"], [1, 16, 50, 84, 99]))
     if cfg["stars"]:  # own random stream, so the galaxies are identical with or without stars
-        mock = add_stars(mock, cfg, np.random.default_rng([cfg["seed"], 1]))
+        mock = add_stars(mock, cfg, np.random.default_rng([cfg["seed"], 1]), star_cfg)
     return MockCatalogue(mock, sfregions, tidal_blobs, tidal_pairs, pdf, donors)
 
 
