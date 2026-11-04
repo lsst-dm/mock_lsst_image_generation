@@ -1,5 +1,12 @@
 # mock_lsst_image_generation
 
+This is a fork of the code created by Tom Sedgwick at
+[tmsedgwick/mock_lsst_image_generation](https://github.com/tmsedgwick/mock_lsst_image_generation).
+The design of the code and its implementation is all his work; in DM we continue to build on it. The package
+itself depends only on numpy, scipy, pandas and GalSim. The adapters that turn these mocks into Rubin Science
+Pipelines data products (afw exposures, a butler repository, a generator PipelineTask) live in a separate package,
+`mock_gen` (importable as `lsst.mock.gen`), which imports this one.
+
 Mock LSST-like galaxy catalogues and images for training and testing source detection and deblending, built from
 physical models and COSMOS2025 data. Every galaxy is a known truth entry, so any detector's completeness and purity can
 be measured exactly.
@@ -156,9 +163,28 @@ Rendering is the slow step; it runs in parallel over `--n-workers` processes (de
 | `coadd_manifest.json` | Every coadd: visits and PSF FWHM per band, noise seed, and whether it was saved |
 | `<catalogue>_<coadd>_signal.npy` | A saved coadd (nJy per pixel), e.g. `test_1y_fwhm110_signal.npy`, `test_10y_nominal_signal.npy` or `test_nexp50_fwhm130_signal.npy` |
 | `<catalogue>_<coadd>_variance.npy` | Its per-pixel variance |
+| `<catalogue>_<coadd>_mask.npy` | Its mask, uint8 (band, y, x). Bit values are in `base_meta.json` under `mask_planes`, named like the LSST stack's planes: `SAT` (1) marks the saturated star cores |
+| `<catalogue>_<coadd>_psf.npy` | Its PSF, float32 (band, 41, 41), centred on the middle pixel (`psf_stamp_pix` in `IMAGE_CONFIG`). Cut out, not renormalised: each band sums to the fraction of a point source's light inside the stamp |
 
 Bands are in `ugrizy` order. A catalogue position (`x_pix`, `y_pix`) falls in array pixel
 `[:, round(y_pix) - origin_y, round(x_pix) - origin_x]`, with `origin` from `base_meta.json`.
+
+By default the canvas spans the galaxy centres, so its size and origin vary slightly between realisations. Pass
+`--canvas-npix N` (usually the catalogues' `--npix`) to make every image exactly frame pixels `[0, N)` on both axes
+with origin `(0, 0)`, e.g. to line images up with a fixed patch grid.
+
+The PSF is constant across the image and comes in two models, named by `psf_model` in `base_meta.json` and in each
+coadd's `coadd_manifest.json` entry:
+
+- `gaussian` (default): a circular Gaussian in every band, with FWHM per band (arcsec) `fwhm_arcsec`. Stars are not pure
+  PSFs: they add a Moffat halo and diffraction spikes (about 5% of their flux) to the Gaussian core, with a shape drawn
+  per star.
+- `moffat` (`--psf-model moffat`, one coadd only): a Moffat core (`fwhm_arcsec`, `moffat_beta`) plus the stars' halo and
+  diffraction spikes, with one shape per band (`psf_wings`), and every source is convolved with all of it. Stars are
+  pure PSFs, and galaxies share the halo and spikes. The core FWHMs scale from `moffat_fwhm` in `IMAGE_CONFIG`
+  (sharpest in r and i), and each band's FWHM and Moffat index get a small random jitter from the coadd's seed. The
+  saved base render is drawn with the core, and the coadd adds the halo and spikes (`psf.py`); `base_spikes_signal.npy`
+  then holds the light of the PSF's spikes in the coadd, from every source.
 
 ### Large training frames
 
@@ -178,6 +204,23 @@ across seams; both are negligible for training. Each 7000 px part takes about an
 only some of them, so two shells can share the work (`--parts 0 1` and `--parts 2 3`), and the frame is stitched once
 all are done. The frame and its component images take 19 GB, and training reads its tiles at random: keep it on a
 fast local disk (from a USB drive training ran about ten times slower).
+
+## Truth tables for scoring a detector
+
+A detector that seeds a deblender should find one peak per component that is a local maximum. `truth_peaks.py` builds
+the truth tables for that from a catalogue and a coadd's noise-free image:
+
+- `truth_table` lists one row per galaxy, star, star-forming region and tidal blob (`kind`), with its position,
+  per-band flux, parent galaxy, `population` and `hubble_type`, and per band whether it is a local maximum of the
+  coadd's noise-free image (`peak_<band>`) with that maximum's S/N and offset.
+- `find_truth_peaks` returns every local maximum of the noise-free image above a per-pixel S/N floor, per band, with
+  the component it belongs to (`truth_id`, or -1 if none is within the match radius).
+
+The noise-free image is the base render broadened to the coadd's PSF, so coadds rebuilt on the fly (train, valid) work
+too. Spiral arms, bars and irregular modes are not components: they move a disc's own light around, so a maximum they
+make is matched to its galaxy or a star-forming region on it. A galaxy's flux excludes its star-forming regions and
+tidal blobs, which have their own rows. At LSST resolution most star-forming regions and all tidal blobs are not
+separate maxima, so score completeness against the components with `peak_<band>` set rather than against every row.
 
 ## Example commands
 
@@ -233,6 +276,10 @@ python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-
 
 # Worst-case seeing at full 10-year depth (184 r-band visits)
 python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --n-exp 184 --psf-fwhm 2.0
+
+# 1-year depth on a 4200 x 4200 px patch, Moffat PSF with halo and spikes shared by every source
+python scripts/generate_mock_catalogues.py --out-dir ~/mocks/catalogues --n-catalogues 1 --numbered --npix 4200
+python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --epoch 1y --psf-model moffat --canvas-npix 4200
 
 # More parallel rendering processes (default: up to 8)
 python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --n-workers 10

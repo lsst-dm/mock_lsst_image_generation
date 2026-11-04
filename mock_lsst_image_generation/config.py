@@ -116,7 +116,7 @@ CONFIG: dict[str, Any] = dict(
     # BCG-like core-Sersic sources (BCG core + extended envelope; bcg_sources.py, ICL_DoubleSersic_Injection.ipynb):
     # Re (arcsec) log-uniform and mean r-band SB within the half-light area mu_r uniform in these ranges.
     # The rates keep these classes rare enough not to crowd a frame (their footprints cover ~2% of it) while a
-    # training frame of ~0.6 deg^2 (14000 x 14000 px; scripts/generate_large_training_frame.py) holds several hundred
+    # training frame of ~0.6 deg^2 (14000 x 14000 px; bin.src/generate_large_training_frame.py) holds several hundred
     # of each: ~480 UDGs, ~480 extended dIrrs, ~240 almost-dark galaxies, ~24 BCGs. A 5000 x 5000 px frame holds ~1/8
     # of that. Almost-dark galaxies are drawn 4x as often as the others' rate would suggest, being the rarest.
     bcgs=True, bcg_per_deg2=40, bcg_re_arcsec=(5.0, 30.0), bcg_mu_r=(20.0, 25.0),
@@ -185,8 +185,24 @@ IMAGE_CONFIG: dict[str, Any] = dict(
     # Catalogues whose coadds are not saved by default: training code rebuilds them on the fly from the base image.
     on_the_fly_catalogues=["train", "valid"],
     min_stamp_pix=25,  # smallest GalSim stamp; there is deliberately no maximum, so no flux is clipped
+    # Image canvas. None: the canvas spans the galaxy centres, so its size and origin depend on the realisation. An
+    # integer N: the canvas is exactly frame pixels [0, N) on both axes with origin (0, 0), e.g. the catalogue's npix,
+    # so images line up with a fixed patch grid. Light from sources off the canvas is clipped at its edges either way.
+    canvas_npix=None,
     # Spiral arms, bars and irregular clumps (galaxy_structure.py) are drawn on discs at least this large (arcsec).
     structure_min_re_arcsec=0.4,
+    # PSF model. "gaussian": every source sees a Gaussian PSF and only stars get a halo and diffraction spikes; the
+    # training grid needs it, since one base render is broadened to every seeing. "moffat" (single coadds only): a
+    # Moffat core of FWHM moffat_fwhm and index moffat_beta per band, each jittered by fwhm_ratio_jitter /
+    # moffat_beta_jitter, with the stars' halo and spikes (STAR_CONFIG) as part of the PSF, so galaxies and stars see
+    # the same PSF. psf_wings fixes the halo and spike shape that STAR_CONFIG otherwise draws per star.
+    psf_model="gaussian",
+    moffat_fwhm=dict(u=1.25, g=1.05, r=0.85, i=0.80, z=0.95, y=1.10),
+    moffat_beta=dict(u=2.8, g=3.2, r=3.6, i=3.6, z=3.3, y=3.0), moffat_beta_jitter=0.05,
+    psf_wings=dict(half_pix=300, halo_cut_arcsec=27.5, streak_strength=0.2, spike_core_arcsec=1.0, spike_slope=2.2,
+                   spike_width=1.4),
+    # Side of the PSF image saved with each coadd (pixels, odd).
+    psf_stamp_pix=41,
 )
 
 

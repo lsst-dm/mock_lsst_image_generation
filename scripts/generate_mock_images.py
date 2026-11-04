@@ -15,6 +15,8 @@ from the saved base render, so they take no disk space.
     python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --epoch 10y
     # one coadd: 50 r-band visits, r FWHM 1.3"
     python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --n-exp 50 --psf-fwhm 1.3
+    # one coadd: 1 year of visits, a Moffat PSF with halo and diffraction spikes for every source, 4200 px patch
+    python scripts/generate_mock_images.py --catalogue-dir ~/mocks/catalogues --out-dir ~/mocks/images --epoch 1y --psf-model moffat --canvas-npix 4200
 
 Keep both folders outside the repo. Outputs go to <out-dir>/<catalogue>/; see
 mock_lsst_image_generation/image_pipeline.py for the file list.
@@ -44,6 +46,12 @@ def main():
     single.add_argument("--n-exp", type=int, help="number of r-band visits (other bands scale with the survey plan)")
     single.add_argument("--psf-fwhm", type=float,
                         help="r-band PSF FWHM in arcsec (other bands scale with the nominal ratios)")
+    single.add_argument("--psf-model", choices=["gaussian", "moffat"], default="gaussian",
+                        help="gaussian (default), or a Moffat core whose halo and diffraction spikes every source "
+                             "shares (one coadd only; see IMAGE_CONFIG moffat_fwhm, moffat_beta, psf_wings)")
+    parser.add_argument("--canvas-npix", type=int, metavar="N",
+                        help="make every image exactly frame pixels [0, N) on both axes, e.g. the --npix the "
+                             "catalogues were built with (default: the canvas spans the galaxy centres)")
     parser.add_argument("--n-workers", type=int, default=min(8, os.cpu_count() or 1),
                         help="parallel rendering processes (default: %(default)s)")
     args = parser.parse_args()
@@ -54,8 +62,11 @@ def main():
         parser.error("give --epoch, or --n-exp with --psf-fwhm, not both")
     if one_coadd and args.all_images:
         parser.error("--all-images makes the whole grid; it cannot be combined with --epoch / --n-exp")
+    if args.psf_model == "moffat" and not one_coadd:
+        parser.error("--psf-model moffat makes one coadd: give --epoch, or --n-exp with --psf-fwhm")
     mode = "single" if one_coadd else "all" if args.all_images else "training"
-    generate_mock_images(args.catalogue_dir, args.out_dir, args.catalogue, mode, n_workers=args.n_workers,
+    cfg = dict(psf_model=args.psf_model, **(dict(canvas_npix=args.canvas_npix) if args.canvas_npix else {}))
+    generate_mock_images(args.catalogue_dir, args.out_dir, args.catalogue, mode, cfg=cfg, n_workers=args.n_workers,
                          epoch=args.epoch, n_exp=args.n_exp, psf_fwhm=args.psf_fwhm)
 
 

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from mock_lsst_image_generation import IMAGE_CONFIG, STAR_CONFIG
-from mock_lsst_image_generation.coadd_synthesis import single_coadd, synthesise_coadd
+from mock_lsst_image_generation.coadd_synthesis import MASK_PLANES, single_coadd, synthesise_coadd
 from mock_lsst_image_generation.stars import add_stars, draw_stars, render_stars, spike_angles
 
 MANY_BRIGHT = {**STAR_CONFIG, "bright_per_deg2": 5000}
@@ -51,3 +51,11 @@ def test_bright_star_gets_striped_saturated_core():
     core = signal[2, 95:106, 95:106]
     assert all(np.ptp(row) < 1e-3 * row.mean() for row in core[3:8, 3:8])  # rows inside the core are flat ...
     assert np.ptp(core[3:8, 5]) > 0  # ... but differ from row to row (the stripes)
+
+    masked_signal, _, mask = synthesise_coadd(image, coadd, IMAGE_CONFIG, star, (0, 0), return_mask=True)
+    assert np.array_equal(masked_signal, signal)  # asking for the mask does not change the coadd
+    saturated = (mask & (1 << MASK_PLANES["SAT"])) > 0
+    assert saturated[2, 98:103, 98:103].all()  # the core is SAT ...
+    assert not saturated[:, :, :60].any()  # ... and nothing far from it
+    replaced = ~np.isclose(signal, synthesise_coadd(image, coadd, IMAGE_CONFIG)[0])  # cores changed by saturation
+    assert not (replaced & ~saturated).any()  # every pixel the cores changed is masked

@@ -194,11 +194,12 @@ def smooth_series(n, rng, correlation):
     return (series - series.mean()) / max(series.std(), 1e-9)
 
 
-def fill_saturated_core(image, clean, level, rng, stretch, shift, star_cfg=STAR_CONFIG):
+def fill_saturated_core(image, clean, level, rng, stretch, shift, star_cfg=STAR_CONFIG, mask_out=None):
     """Replace a star's saturated core in `image` (one band, stamp-sized) with flat rows, as LSST coadds show it.
 
     The region is where the noise-free `clean` image exceeds `level`, stretched vertically and shifted (shared by all
     bands of a star). Each row holds level x exp(row_scatter x smooth noise over rows); a 2-pixel rim is dimmed.
+    If mask_out (a boolean array shaped like image) is given, every pixel replaced or dimmed here is set True in it.
     """
     ny, nx = clean.shape
     yc, xc = np.unravel_index(np.argmax(clean), clean.shape)
@@ -217,11 +218,16 @@ def fill_saturated_core(image, clean, level, rng, stretch, shift, star_cfg=STAR_
         image[row, start:stop + 1] = value
     rim = binary_dilation(filled, iterations=2) & ~filled
     image[rim] *= 1 - 0.15 * rng.uniform()
+    if mask_out is not None:
+        mask_out |= filled | rim
     return image
 
 
-def saturate_stars(signal, clean, stars, origin, bands, rng, star_cfg=STAR_CONFIG):
-    """Apply saturated cores to a noised coadd `signal`, given its noise-free version `clean` (both band, ny, nx)."""
+def saturate_stars(signal, clean, stars, origin, bands, rng, star_cfg=STAR_CONFIG, mask_out=None):
+    """Apply saturated cores to a noised coadd `signal`, given its noise-free version `clean` (both band, ny, nx).
+
+    If mask_out (a boolean array shaped like signal) is given, the pixels of every saturated core are set True in it:
+    the coadd's SAT mask plane. The random draws are the same with or without it."""
     ny, nx = signal.shape[1:]
     for star in stars.itertuples():
         x, y = int(round(star.x_pix)) - origin[0], int(round(star.y_pix)) - origin[1]
@@ -233,6 +239,7 @@ def saturate_stars(signal, clean, stars, origin, bands, rng, star_cfg=STAR_CONFI
         for i, band in enumerate(bands):
             level = star.saturation_r * star_cfg["saturation_ratio"][band]
             if clean[i][box].max() > level:
+                band_mask = None if mask_out is None else mask_out[i][box]  # a view: filled in place
                 signal[i][box] = fill_saturated_core(signal[i][box].copy(), clean[i][box], level, rng, stretch, shift,
-                                                     star_cfg)
+                                                     star_cfg, band_mask)
     return signal

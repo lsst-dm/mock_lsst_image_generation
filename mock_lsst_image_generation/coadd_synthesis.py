@@ -12,9 +12,12 @@ from typing import TypedDict
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
+from .psf import add_wings
 from .stars import saturate_stars
 
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+# Bits of the saved coadd mask (uint8, band x y x), named as the LSST stack's mask planes so they can be copied across.
+MASK_PLANES = {"SAT": 0}
 
 
 class CoaddSettings(TypedDict):
@@ -27,6 +30,9 @@ class CoaddSettings(TypedDict):
     fwhm_arcsec: dict[str, float]
     seed_entropy: list[int]
     noise_seed: np.random.SeedSequence
+    psf_model: str
+    moffat_beta: dict[str, float] | None
+    psf_wings: dict | None
 
 
 def visits_at(survey_fraction, cfg):
@@ -60,7 +66,7 @@ def coadd_grid(catalogue_index, cfg) -> dict[str, CoaddSettings]:
             grid[f"{epoch}_fwhm{int(round(fwhm_r * 100)):03d}"] = CoaddSettings(
                 epoch=epoch, survey_fraction=survey_fraction, f_r=fwhm_r, n_visit=visits_at(survey_fraction, cfg),
                 fwhm_arcsec=jittered_band_fwhm(fwhm_r, jitter_seed, cfg), seed_entropy=seed_entropy,
-                noise_seed=noise_seed)
+                noise_seed=noise_seed, psf_model="gaussian", moffat_beta=None, psf_wings=None)
     return grid
 
 
@@ -82,36 +88,69 @@ def single_coadd(catalogue_index, cfg, epoch=None, n_exp=None, psf_fwhm=None) ->
                         and the nominal PSF ratios.
 
     The noise seed depends only on the catalogue and the coadd's visits and PSF, so the same request gives the same
-    image every time.
+    image every time. With cfg['psf_model'] 'moffat', the PSF is a Moffat scaled from moffat_fwhm, and each band's
+    FWHM and Moffat index get a random jitter drawn from that seed.
     """
-    nominal = cfg["nominal_fwhm"]
+    moffat = cfg.get("psf_model", "gaussian") == "moffat"
+    nominal = cfg["moffat_fwhm"] if moffat else cfg["nominal_fwhm"]
     if epoch is not None and n_exp is None and psf_fwhm is None:
-        key, fraction, fwhm = f"{epoch}_nominal", survey_fraction(epoch), dict(nominal)
+        key, fraction, fwhm = f"{epoch}_{'moffat' if moffat else 'nominal'}", survey_fraction(epoch), dict(nominal)
     elif epoch is None and n_exp is not None and psf_fwhm is not None:
         key, fraction = f"nexp{int(n_exp)}_fwhm{int(round(psf_fwhm * 100)):03d}", n_exp / cfg["visits_10yr"]["r"]
         fwhm = {band: psf_fwhm * nominal[band] / nominal["r"] for band in cfg["bands"]}
     else:
         raise ValueError("give either epoch alone, or both n_exp and psf_fwhm")
-    if fraction <= 0 or min(fwhm.values()) <= cfg["base_fwhm"]:
+    if fraction <= 0 or (not moffat and min(fwhm.values()) <= cfg["base_fwhm"]):
         raise ValueError(f"need at least one visit and a PSF wider than the {cfg['base_fwhm']}\" base PSF in every band")
     n_visit = visits_at(fraction, cfg)
     seed_entropy = [catalogue_index, 999, n_visit["r"], int(round(fwhm["r"] * 1000))]  # never matches a grid seed
+    beta = None
+    if moffat:
+        # Rounded as the manifest stores them, so the PSF rebuilt from it is the one the image was made with.
+        rng = np.random.default_rng(seed_entropy + [6])
+        fwhm = {band: round(fwhm[band] * (1 + rng.normal(0, cfg["fwhm_ratio_jitter"])), 4) for band in cfg["bands"]}
+        beta = {band: round(cfg["moffat_beta"][band] * (1 + rng.normal(0, cfg["moffat_beta_jitter"])), 4)
+                for band in cfg["bands"]}
     return {key: CoaddSettings(epoch=epoch, survey_fraction=fraction, f_r=fwhm["r"], n_visit=n_visit, fwhm_arcsec=fwhm,
-                      seed_entropy=seed_entropy, noise_seed=np.random.SeedSequence(seed_entropy))}
+                      seed_entropy=seed_entropy, noise_seed=np.random.SeedSequence(seed_entropy),
+                      psf_model="moffat" if moffat else "gaussian", moffat_beta=beta,
+                      psf_wings=dict(cfg["psf_wings"]) if moffat else None)}
+
+
+def broaden_band(band_image, band, target_fwhm, cfg):
+    """Broaden one band's base-PSF image (y, x) to that band's target FWHM (arcsec) with a Gaussian of the
+    quadrature difference."""
+    base_fwhm, target = cfg["base_fwhm"], float(target_fwhm[band])
+    if target < base_fwhm:
+        raise ValueError(f"target FWHM {target:.3f} < base {base_fwhm:.3f} for band {band}")
+    sigma_pix = (np.sqrt(target ** 2 - base_fwhm ** 2) * FWHM_TO_SIGMA) / cfg["pixscale"]
+    if sigma_pix <= 0:
+        return band_image.copy()
+    return gaussian_filter(band_image, sigma=sigma_pix, mode="constant", cval=0.0, truncate=5.0)
 
 
 def broaden(image, target_fwhm, cfg):
     """Broaden a base-PSF image to the per-band target FWHM (arcsec) with a Gaussian of the quadrature difference."""
-    base_fwhm = cfg["base_fwhm"]
     broadened = np.empty_like(image)
     for i, band in enumerate(cfg["bands"]):
-        target = float(target_fwhm[band])
-        if target < base_fwhm:
-            raise ValueError(f"target FWHM {target:.3f} < base {base_fwhm:.3f} for band {band}")
-        sigma_pix = (np.sqrt(target ** 2 - base_fwhm ** 2) * FWHM_TO_SIGMA) / cfg["pixscale"]
-        broadened[i] = image[i] if sigma_pix <= 0 else gaussian_filter(image[i], sigma=sigma_pix, mode="constant",
-                                                                       cval=0.0, truncate=5.0)
+        broadened[i] = broaden_band(image[i], band, target_fwhm, cfg)
     return broadened
+
+
+def coadd_psf_band(band_image, band, coadd, cfg):
+    """One band of a base render taken to a coadd's PSF: broadened (Gaussian model) or convolved with the halo and
+    spikes kernel (Moffat model, whose base render already has the coadd's core; psf.py)."""
+    if coadd.get("psf_model", "gaussian") == "moffat":
+        return add_wings(band_image, band, coadd, cfg)
+    return broaden_band(band_image, band, coadd["fwhm_arcsec"], cfg)
+
+
+def coadd_psf(image, coadd, cfg):
+    """A base render taken to a coadd's PSF in every band (coadd_psf_band)."""
+    clean = np.empty_like(image)
+    for i, band in enumerate(cfg["bands"]):
+        clean[i] = coadd_psf_band(image[i], band, coadd, cfg)
+    return clean
 
 
 def sky_sigma(band, n_visit, cfg):
@@ -136,14 +175,20 @@ def add_noise(image, n_visit, seed, cfg):
     return signal, variance
 
 
-def synthesise_coadd(base_image, coadd, cfg, stars=None, origin=(0, 0)):
-    """(signal, variance) float32 cubes for one coadd_grid / single_coadd entry, from the base-PSF render.
+def synthesise_coadd(base_image, coadd, cfg, stars=None, origin=(0, 0), return_mask=False):
+    """(signal, variance) float32 cubes for one coadd_grid / single_coadd entry, from the base-PSF render; with
+    return_mask, (signal, variance, mask), where mask is a uint8 cube whose bits are given by MASK_PLANES.
 
     Stars (catalogue rows in frame pixels; origin is the frame pixel at base_image[:, 0, 0]) get saturated cores after
-    the noise, as in real coadds."""
-    clean = broaden(base_image, coadd["fwhm_arcsec"], cfg)
+    the noise, as in real coadds; their pixels are the SAT bit of the mask. The signal and variance are identical with
+    or without return_mask."""
+    clean = coadd_psf(base_image, coadd, cfg)
     signal, variance = add_noise(clean, coadd["n_visit"], coadd["noise_seed"], cfg)
+    saturated = np.zeros(signal.shape, bool)
     if stars is not None and len(stars):
         signal = saturate_stars(signal, clean, stars, origin, cfg["bands"],
-                                np.random.default_rng(list(coadd["seed_entropy"]) + [3]))
-    return signal.astype(np.float32, copy=False), variance.astype(np.float32, copy=False)
+                                np.random.default_rng(list(coadd["seed_entropy"]) + [3]), mask_out=saturated)
+    signal, variance = signal.astype(np.float32, copy=False), variance.astype(np.float32, copy=False)
+    if not return_mask:
+        return signal, variance
+    return signal, variance, (saturated.astype(np.uint8) << MASK_PLANES["SAT"])
